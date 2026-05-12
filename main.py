@@ -73,6 +73,11 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class GoogleLoginRequest(BaseModel):
+    name: str
+    email: str
+    photoUrl: str = ""
+
 class PatientRequest(BaseModel):
     id: str
     name: str
@@ -95,6 +100,8 @@ class ScanResultRequest(BaseModel):
     recommendation: str
     imageAnalysis: List[ImageAnalysisModel]
     scanDate: str
+
+
 
 
 # ══════════════════════════════════════════════════════════════
@@ -229,6 +236,54 @@ async def login(req: LoginRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+    
+
+@app.post("/auth/google-login")
+async def google_login(req: GoogleLoginRequest):
+    try:
+        if not req.email or "@" not in req.email:
+            raise HTTPException(status_code=400, detail="Invalid email.")
+
+        # Check if user exists
+        user = await users_col.find_one({"email": req.email.lower().strip()})
+
+        if user:
+            # User exists — login
+            user = fix_id(user)
+        else:
+            # New user — create account
+            user_doc = {
+                "name": req.name.strip(),
+                "email": req.email.lower().strip(),
+                "password": "",  # No password for Google users
+                "role": "doctor",
+                "photoUrl": req.photoUrl,
+                "loginType": "google",
+                "createdAt": datetime.utcnow().isoformat(),
+            }
+            result = await users_col.insert_one(user_doc)
+            user_doc["_id"] = str(result.inserted_id)
+            user = user_doc
+
+        token = create_token({"sub": user["email"]})
+        print(f"Google login: {user['email']}")
+
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user["_id"],
+                "name": user["name"],
+                "email": user["email"],
+                "role": user.get("role", "doctor"),
+                "photoUrl": user.get("photoUrl", ""),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Google login failed: {str(e)}")
 
 
 @app.get("/auth/me")
