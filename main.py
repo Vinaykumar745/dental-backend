@@ -15,10 +15,39 @@ import traceback
 import io
 import json
 import random
+import tensorflow as tf
+from PIL import Image
+import numpy as np
 
 load_dotenv()
 
 app = FastAPI(title="DentalScan AI Backend", version="1.0.0")
+
+# ── Load Model and Classes ────────────────────────────────────
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "dental_ai_model.h5")
+CLASSES_PATH = os.path.join(os.path.dirname(__file__), "class_names.json")
+
+model = None
+class_names = {}
+
+@app.on_event("startup")
+def load_ai_model():
+    global model, class_names
+    try:
+        if os.path.exists(MODEL_PATH):
+            print("Loading TensorFlow model...")
+            model = tf.keras.models.load_model(MODEL_PATH)
+            print("Model loaded successfully!")
+        else:
+            print(f"WARNING: Model file not found at {MODEL_PATH}")
+        
+        if os.path.exists(CLASSES_PATH):
+            with open(CLASSES_PATH, "r") as f:
+                class_names = json.load(f)
+            print(f"Class names loaded: {class_names}")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -84,12 +113,9 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User not found.")
     return fix_id(user)
 
-# ── AI Analysis (Smart Mock) ──────────────────────────────────
-def analyze_image(image_bytes: bytes) -> dict:
-    """Smart mock AI analysis - replace with real model after training"""
+# ── AI Analysis (Smart Mock Fallback) ───────────────────────────
+def analyze_image_mock(image_bytes: bytes) -> dict:
     try:
-        from PIL import Image
-        import numpy as np
         # Load image and analyze basic properties
         img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
         img_array = np.array(img)
@@ -112,6 +138,34 @@ def analyze_image(image_bytes: bytes) -> dict:
         print(f"Analysis error: {e}")
         disease = random.choice(['normal', 'leukoplakia', 'erythroplakia'])
         return {'disease': disease, 'confidence': round(random.uniform(65, 90), 2)}
+
+
+# ── AI Analysis (Real Model) ──────────────────────────────────
+def analyze_image(image_bytes: bytes) -> dict:
+    global model, class_names
+    try:
+        if model is None:
+            print("Model not loaded. Using fallback mock.")
+            return analyze_image_mock(image_bytes)
+        
+        # Load and preprocess image
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        img = img.resize((224, 224))
+        img_array = np.array(img) / 255.0  # Normalize as per train_model.py
+        img_array = np.expand_dims(img_array, axis=0)  # Shape (1, 224, 224, 3)
+
+        # Run inference
+        predictions = model.predict(img_array)
+        class_idx = int(np.argmax(predictions[0]))
+        confidence = float(predictions[0][class_idx]) * 100
+
+        # Get class name
+        disease = class_names.get(str(class_idx), "unknown")
+        
+        return {'disease': disease, 'confidence': round(confidence, 2)}
+    except Exception as e:
+        print(f"Prediction error: {e}")
+        return analyze_image_mock(image_bytes)
 
 
 # ══════════════════════════════════════════════════════════════
