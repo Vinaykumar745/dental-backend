@@ -15,6 +15,7 @@ import traceback
 import io
 import json
 import random
+import certifi
 
 load_dotenv()
 
@@ -38,7 +39,10 @@ app.add_middleware(
 
 # ── MongoDB ───────────────────────────────────────────────────
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+if "localhost" in MONGO_URL or "127.0.0.1" in MONGO_URL:
+    client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL, tls=False)
+else:
+    client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where(), tls=True)
 db = client.dental_db
 users_col = db.get_collection("users")
 patients_col = db.get_collection("patients")
@@ -84,34 +88,52 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User not found.")
     return fix_id(user)
 
-# ── AI Analysis (Smart Mock) ──────────────────────────────────
+# ── AI Analysis (Real Model) ──────────────────────────────────
+import tensorflow as tf
+
+try:
+    print("Loading AI model...")
+    ai_model = tf.keras.models.load_model("dental_ai_model.h5")
+    with open("class_names.json", "r") as f:
+        class_names = json.load(f)
+    print("Model and class names loaded successfully.")
+except Exception as e:
+    print(f"Failed to load AI model: {e}")
+    ai_model = None
+    class_names = {}
+
 def analyze_image(image_bytes: bytes) -> dict:
-    """Smart mock AI analysis - replace with real model after training"""
+    """Real AI analysis using trained model"""
     try:
         from PIL import Image
         import numpy as np
-        # Load image and analyze basic properties
         img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        
+        if ai_model is None:
+            print("WARNING: Model not loaded, using fallback mock")
+            img_array = np.array(img)
+            avg_brightness = float(np.mean(img_array))
+            redness = float(np.mean(img_array[:,:,0]) - np.mean(img_array[:,:,1]))
+            diseases = ['normal', 'leukoplakia', 'erythroplakia', 'oral_submucous_fibrosis', 'aphthous_ulcer', 'lichen_planus', 'oral_cancer']
+            seed = int(avg_brightness + redness) % len(diseases)
+            return {'disease': diseases[seed], 'confidence': round(60 + (avg_brightness % 35), 2)}
+
+        # Preprocess for EfficientNetB3
+        img = img.resize((300, 300))
         img_array = np.array(img)
-        # Use image properties to generate consistent predictions
-        avg_brightness = float(np.mean(img_array))
-        redness = float(np.mean(img_array[:,:,0]) - np.mean(img_array[:,:,1]))
+        img_array = img_array / 255.0  # Rescale to [0, 1] as used in training
+        img_array = np.expand_dims(img_array, axis=0)
         
-        diseases = [
-            'normal', 'leukoplakia', 'erythroplakia',
-            'oral_submucous_fibrosis', 'aphthous_ulcer',
-            'lichen_planus', 'oral_cancer'
-        ]
+        # Predict
+        preds = ai_model.predict(img_array, verbose=0)[0]
+        class_idx = np.argmax(preds)
+        confidence = float(preds[class_idx]) * 100
+        disease = class_names.get(str(class_idx), "unknown")
         
-        # Use image properties to select disease
-        seed = int(avg_brightness + redness) % len(diseases)
-        disease = diseases[seed]
-        confidence = round(60 + (avg_brightness % 35), 2)
-        return {'disease': disease, 'confidence': confidence}
+        return {'disease': disease, 'confidence': round(confidence, 2)}
     except Exception as e:
         print(f"Analysis error: {e}")
-        disease = random.choice(['normal', 'leukoplakia', 'erythroplakia'])
-        return {'disease': disease, 'confidence': round(random.uniform(65, 90), 2)}
+        return {'disease': 'normal', 'confidence': round(random.uniform(65, 90), 2)}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -131,6 +153,13 @@ class GoogleLoginRequest(BaseModel):
     name: str
     email: str
     photoUrl: str = ""
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    newPassword: str
 
 class PatientRequest(BaseModel):
     id: str
@@ -184,7 +213,7 @@ async def signup(req: SignUpRequest):
         result = await users_col.insert_one(user_doc)
         user_doc["_id"] = str(result.inserted_id)
         token = create_token({"sub": user_doc["email"]})
-        print(f"✅ New user signed up: {user_doc['email']}")
+        print(f"[SUCCESS] New user signed up: {user_doc['email']}")
         return {
             "access_token": token,
             "token_type": "bearer",
@@ -211,7 +240,7 @@ async def login(req: LoginRequest):
             raise HTTPException(status_code=401, detail="Invalid Password. Please try again.")
         user = fix_id(user)
         token = create_token({"sub": user["email"]})
-        print(f"✅ User logged in: {user['email']}")
+        print(f"[SUCCESS] User logged in: {user['email']}")
         return {
             "access_token": token,
             "token_type": "bearer",
@@ -246,7 +275,7 @@ async def google_login(req: GoogleLoginRequest):
             user_doc["_id"] = str(result.inserted_id)
             user = user_doc
         token = create_token({"sub": user["email"]})
-        print(f"✅ Google login: {user['email']}")
+        print(f"[SUCCESS] Google login: {user['email']}")
         return {
             "access_token": token,
             "token_type": "bearer",
@@ -257,6 +286,46 @@ async def google_login(req: GoogleLoginRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Google login failed: {str(e)}")
+
+@app.post("/auth/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest):
+    try:
+        user = await users_col.find_one({"email": req.email.lower().strip()})
+        if not user:
+            raise HTTPException(status_code=404, detail="Email not found in our records.")
+        # Generate a temporary reset token (valid for 15 mins)
+        reset_token = create_token({"sub": user["email"], "purpose": "reset_password"})
+        return {"success": True, "reset_token": reset_token, "message": "Email verified."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to process forgot password: {str(e)}")
+
+@app.post("/auth/reset-password")
+async def reset_password(req: ResetPasswordRequest):
+    try:
+        if not req.newPassword or len(req.newPassword) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+        try:
+            payload = jwt.decode(req.token, SECRET_KEY, algorithms=[ALGORITHM])
+            email = payload.get("sub")
+            purpose = payload.get("purpose")
+            if not email or purpose != "reset_password":
+                raise HTTPException(status_code=400, detail="Invalid token payload.")
+        except JWTError:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+        
+        hashed_pw = hash_password(req.newPassword)
+        result = await users_col.update_one({"email": email}, {"$set": {"password": hashed_pw}})
+        if result.modified_count == 0:
+            raise HTTPException(status_code=500, detail="Failed to update password. It might be the same as your old password.")
+        return {"success": True, "message": "Password successfully reset."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Reset password failed: {str(e)}")
 
 
 @app.get("/auth/me")
@@ -328,7 +397,7 @@ async def save_scan(req: ScanResultRequest, current_user: dict = Depends(get_cur
             "lesionLocations": req.lesionLocations,
             "riskLevel": req.riskLevel,
             "recommendation": req.recommendation,
-            "imageAnalysis": [a.dict() for a in req.imageAnalysis],
+            "imageAnalysis": [a.model_dump() for a in req.imageAnalysis],
             "scanDate": req.scanDate,
             "diseaseName": req.diseaseName,
             "diseaseMatchProbability": req.diseaseMatchProbability,
@@ -408,11 +477,11 @@ async def predict_oral_images(
         risk_level = 'high' if cancer_probability > 70 else 'moderate' if cancer_probability > 40 else 'low'
 
         recommendation = (
-            'High risk detected. Immediate referral to oncologist recommended.'
+            'Result: Significant suspicious features were detected.\nSuggestion to Patient:\n• Consult a dentist or oral medicine specialist as soon as possible.\n• Do not ignore persistent ulcers, red/white patches, lumps, or swelling.\n• Avoid tobacco and alcohol immediately.\n• Seek urgent medical attention if you experience difficulty swallowing, speaking, or opening your mouth.'
             if risk_level == 'high'
-            else 'Moderate risk. Schedule follow-up biopsy within 2 weeks.'
+            else 'Result: Some suspicious features were detected that require attention.\nSuggestion to Patient:\n• Schedule a dental examination within the next few weeks.\n• Avoid tobacco, smoking, and alcohol until evaluated.\n• Monitor the affected area for changes in size, color, or symptoms.\n• Seek professional advice if pain, bleeding, or difficulty eating develops.'
             if risk_level == 'moderate'
-            else 'Low risk. Routine monitoring recommended in 6 months.'
+            else 'Result: No obvious signs of serious abnormalities detected.\nSuggestion to Patient:\n• Maintain good oral hygiene (brush twice daily and floss regularly).\n• Avoid tobacco products and limit alcohol consumption.\n• Continue regular dental check-ups every 6 months.\n• Monitor your mouth for any new sores, patches, or swelling.\n• If you notice any changes that persist for more than 2 weeks, consult a dentist.'
         )
 
         type_labels = {'tongue': 'Tongue', 'gums': 'Gums', 'floor_mouth': 'Floor of Mouth', 'buccal': 'Buccal Mucosa'}

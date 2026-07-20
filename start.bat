@@ -22,8 +22,8 @@ pip install -r requirements.txt --quiet
 echo.
 echo ========================================
 echo   Backend running at:
-echo   http://10.254.142.226:8000
-echo   API Docs: http://10.254.142.226:8000/docs
+echo   http://10.20.166.127:8000
+echo   API Docs: http://10.20.166.127:8000/docs
 echo ========================================
 echo.
 echo Press CTRL+C to stop the server

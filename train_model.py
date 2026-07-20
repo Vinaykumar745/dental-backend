@@ -1,5 +1,5 @@
 import tensorflow as tf
-from tensorflow.keras.applications import EfficientNetB0
+from tensorflow.keras.applications import EfficientNetB3
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.models import Model
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
@@ -11,10 +11,10 @@ print("TensorFlow version:", tf.__version__)
 print("Starting training setup...")
 
 # ── Configuration ──────────────────────────────────────────────
-IMG_SIZE = 224
+IMG_SIZE = 300
 BATCH_SIZE = 16
-EPOCHS_PHASE1 = 15
-EPOCHS_PHASE2 = 10
+EPOCHS_PHASE1 = 30
+EPOCHS_PHASE2 = 25
 DATASET_PATH = "dataset"
 
 # ── Check dataset exists ───────────────────────────────────────
@@ -45,14 +45,14 @@ print("\nPreparing data generators...")
 
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    rotation_range=30,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
+    rotation_range=45,
+    width_shift_range=0.3,
+    height_shift_range=0.3,
     horizontal_flip=True,
-    vertical_flip=False,
-    zoom_range=0.2,
-    brightness_range=[0.8, 1.2],
-    shear_range=0.1,
+    vertical_flip=True,
+    zoom_range=0.3,
+    brightness_range=[0.7, 1.3],
+    shear_range=0.2,
     fill_mode='nearest',
     validation_split=0.2
 )
@@ -90,7 +90,7 @@ print(f"Class names saved: {class_names}")
 # ── Build model ────────────────────────────────────────────────
 print("\nBuilding model...")
 
-base_model = EfficientNetB0(
+base_model = EfficientNetB3(
     weights='imagenet',
     include_top=False,
     input_shape=(IMG_SIZE, IMG_SIZE, 3)
