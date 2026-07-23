@@ -226,6 +226,20 @@ async def signup(req: SignUpRequest):
         raise HTTPException(status_code=500, detail=f"Signup failed: {str(e)}")
 
 
+@app.get("/debug/users")
+async def debug_users():
+    try:
+        users = await users_col.find().to_list(100)
+        # Remove passwords for safety, and fix ObjectId
+        clean_users = []
+        for u in users:
+            u = fix_id(u)
+            u.pop("password", None)
+            clean_users.append(u)
+        return {"status": "success", "source": "MongoDB Atlas Cloud", "count": len(clean_users), "users": clean_users}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.post("/auth/login")
 async def login(req: LoginRequest):
     try:
