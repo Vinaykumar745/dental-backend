@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -89,18 +89,39 @@ async def get_current_user(
     return fix_id(user)
 
 # ── AI Analysis (Real Model) ──────────────────────────────────
-import tensorflow as tf
+ai_model = None
+class_names = {}
+anatomy_model = None
+anatomy_classes = {}
 
-try:
-    print("Loading AI model...")
-    ai_model = tf.keras.models.load_model("dental_ai_model.h5")
-    with open("class_names.json", "r") as f:
-        class_names = json.load(f)
-    print("Model and class names loaded successfully.")
-except Exception as e:
-    print(f"Failed to load AI model: {e}")
-    ai_model = None
-    class_names = {}
+def load_ai_model_sync():
+    global ai_model, class_names, anatomy_model, anatomy_classes
+    try:
+        import tensorflow as tf
+        print("Loading AI models in background...")
+        # Load main disease model
+        if os.path.exists("dental_ai_model.h5"):
+            ai_model = tf.keras.models.load_model("dental_ai_model.h5")
+            with open("class_names.json", "r") as f:
+                class_names = json.load(f)
+            print("Main disease model loaded.")
+            
+        # Load anatomy validation model
+        if os.path.exists("anatomy_model.h5"):
+            anatomy_model = tf.keras.models.load_model("anatomy_model.h5")
+            with open("anatomy_classes.json", "r") as f:
+                anatomy_classes = json.load(f)
+            print("Anatomy validation model loaded.")
+            
+        print("All models loaded successfully.")
+    except Exception as e:
+        print(f"Failed to load AI models: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    import asyncio
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, load_ai_model_sync)
 
 def analyze_image(image_bytes: bytes) -> dict:
     """Real AI analysis using trained model"""
@@ -135,6 +156,60 @@ def analyze_image(image_bytes: bytes) -> dict:
         print(f"Analysis error: {e}")
         return {'disease': 'normal', 'confidence': round(random.uniform(65, 90), 2)}
 
+@app.post("/validate-image")
+async def validate_image(
+    image: UploadFile = File(...),
+    expected_type: str = Form(...) # 'Tongue', 'Gums', 'Floor of Mouth', 'Buccal Mucosa'
+):
+    try:
+        from fastapi import HTTPException
+        from PIL import Image
+        import numpy as np
+
+        if anatomy_model is None:
+            # If model isn't loaded yet, just let it pass to not block UX
+            return {"valid": True, "detected": "unknown (model not loaded)"}
+            
+        image_bytes = await image.read()
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        
+        # Preprocess for MobileNetV2 (224x224, scaled to 0-1)
+        img = img.resize((224, 224))
+        img_array = np.array(img)
+        img_array = img_array / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
+        
+        # Predict
+        preds = anatomy_model.predict(img_array, verbose=0)[0]
+        class_idx = np.argmax(preds)
+        confidence = float(preds[class_idx]) * 100
+        
+        # anatomy_classes keys are strings '0', '1', '2', '3'
+        detected_class = anatomy_classes.get(str(class_idx), "unknown")
+        
+        # Map frontend expected types to dataset classes
+        # Frontend: 'Tongue', 'Gums', 'Floor of Mouth', 'Buccal Mucosa'
+        # Dataset: 'Tongue', 'Gums', 'Floor_of_Mouth', 'Buccal_Mucosa'
+        type_mapping = {
+            'Tongue': 'Tongue',
+            'Gums': 'Gums',
+            'Floor of Mouth': 'Floor_of_Mouth',
+            'Buccal Mucosa': 'Buccal_Mucosa'
+        }
+        
+        mapped_expected = type_mapping.get(expected_type, expected_type)
+        is_valid = (detected_class == mapped_expected)
+        
+        # Add some leniency for poor quality, but if confidence is high and it's wrong -> invalid
+        return {
+            "valid": is_valid,
+            "detected": detected_class.replace('_', ' '),
+            "confidence": round(confidence, 2)
+        }
+    except Exception as e:
+        print(f"Validation error: {e}")
+        # Fail open
+        return {"valid": True, "error": str(e)}
 
 # ══════════════════════════════════════════════════════════════
 # PYDANTIC MODELS
@@ -165,6 +240,7 @@ class PatientRequest(BaseModel):
     id: str
     name: str
     age: int
+    gender: str
     date: str
     mobile: str
     createdAt: str
@@ -309,7 +385,33 @@ async def forgot_password(req: ForgotPasswordRequest):
             raise HTTPException(status_code=404, detail="Email not found in our records.")
         # Generate a temporary reset token (valid for 15 mins)
         reset_token = create_token({"sub": user["email"], "purpose": "reset_password"})
-        return {"success": True, "reset_token": reset_token, "message": "Email verified."}
+        
+        import smtplib
+        from email.mime.text import MIMEText
+        
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", 587))
+        smtp_user = os.getenv("SMTP_USERNAME")
+        smtp_password = os.getenv("SMTP_PASSWORD")
+
+        if smtp_user and smtp_password:
+            msg = MIMEText(f"Your password reset token is:\n\n{reset_token}\n\nPlease enter this token in the app to reset your password.")
+            msg['Subject'] = 'Password Reset Request'
+            msg['From'] = smtp_user
+            msg['To'] = user["email"]
+            try:
+                server = smtplib.SMTP(smtp_server, smtp_port)
+                server.starttls()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+                server.quit()
+                print(f"Password reset email sent to {user['email']}")
+            except Exception as e:
+                print(f"Failed to send email: {e}")
+        else:
+            print(f"SMTP credentials not configured. Token for {user['email']} is: {reset_token}")
+
+        return {"success": True, "message": "Password reset token sent to your email."}
     except HTTPException:
         raise
     except Exception as e:
@@ -359,6 +461,7 @@ async def create_patient(req: PatientRequest, current_user: dict = Depends(get_c
             "doctorId": current_user["_id"],
             "name": req.name.strip(),
             "age": req.age,
+            "gender": req.gender,
             "date": req.date,
             "mobile": req.mobile,
             "createdAt": req.createdAt,
