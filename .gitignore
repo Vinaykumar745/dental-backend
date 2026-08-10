@@ -10,4 +10,6 @@ dataset/
 dataset_split/
 temp_downloads/
 *.h5
+!anatomy_model.h5
+!dental_ai_model.h5
 __pycache__/
