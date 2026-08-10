@@ -139,10 +139,11 @@ def analyze_image(image_bytes: bytes) -> dict:
             seed = int(avg_brightness + redness) % len(diseases)
             return {'disease': diseases[seed], 'confidence': round(60 + (avg_brightness % 35), 2)}
 
-        # Preprocess for EfficientNetB3
-        img = img.resize((300, 300))
-        img_array = np.array(img)
-        img_array = img_array / 255.0  # Rescale to [0, 1] as used in training
+        # Preprocess for MobileNetV2 (Model expects 224x224 input)
+        from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+        img = img.resize((224, 224))
+        img_array = np.array(img, dtype=np.float32)
+        img_array = preprocess_input(img_array)
         img_array = np.expand_dims(img_array, axis=0)
         
         # Predict
