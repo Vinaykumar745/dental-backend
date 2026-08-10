@@ -4,3 +4,10 @@ uploads/
 *.log
 
 venv/
+
+# AI Training Data & Models
+dataset/
+dataset_split/
+temp_downloads/
+*.h5
+__pycache__/

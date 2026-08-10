@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File, Form
+# Auto-reload trigger for new AI model
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -139,11 +140,10 @@ def analyze_image(image_bytes: bytes) -> dict:
             seed = int(avg_brightness + redness) % len(diseases)
             return {'disease': diseases[seed], 'confidence': round(60 + (avg_brightness % 35), 2)}
 
-        # Preprocess for MobileNetV2 (Model expects 224x224 input)
-        from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+        # Preprocess for MobileNetV2 (Model expects 224x224 input, scaled to [-1, 1])
         img = img.resize((224, 224))
         img_array = np.array(img, dtype=np.float32)
-        img_array = preprocess_input(img_array)
+        img_array = (img_array / 127.5) - 1.0
         img_array = np.expand_dims(img_array, axis=0)
         
         # Predict
@@ -168,8 +168,8 @@ async def validate_image(
         import numpy as np
 
         if anatomy_model is None:
-            # If model isn't loaded yet, just let it pass to not block UX
-            return {"valid": True, "detected": "unknown (model not loaded)"}
+            # Enforce strict validation: fail closed if model is not loaded
+            return {"valid": False, "error": "Validation model is initializing. Please try again in a few seconds."}
             
         image_bytes = await image.read()
         img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
@@ -199,9 +199,17 @@ async def validate_image(
         }
         
         mapped_expected = type_mapping.get(expected_type, expected_type)
-        is_valid = (detected_class == mapped_expected)
         
-        # Add some leniency for poor quality, but if confidence is high and it's wrong -> invalid
+        # Require a minimum confidence to reject out-of-distribution (random) images
+        is_valid = (detected_class == mapped_expected) and (confidence > 50.0)
+        
+        if not is_valid and (detected_class == mapped_expected):
+            return {
+                "valid": False,
+                "detected": f"{detected_class.replace('_', ' ')} (Low Quality/Confidence: {round(confidence, 2)}%)",
+                "confidence": round(confidence, 2)
+            }
+            
         return {
             "valid": is_valid,
             "detected": detected_class.replace('_', ' '),
@@ -209,8 +217,8 @@ async def validate_image(
         }
     except Exception as e:
         print(f"Validation error: {e}")
-        # Fail open
-        return {"valid": True, "error": str(e)}
+        # Fail closed on exceptions to enforce strict validation
+        return {"valid": False, "error": str(e)}
 
 # ══════════════════════════════════════════════════════════════
 # PYDANTIC MODELS
