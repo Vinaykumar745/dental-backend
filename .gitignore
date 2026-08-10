@@ -1,4 +1,11 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.h5
+dataset/
+dataset_split/
+temp_downloads/
 .env
