@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -70,7 +70,6 @@ MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = client.dental_db
 users_col = db.get_collection("users")
-patients_col = db.get_collection("patients")
 scans_col = db.get_collection("scans")
 
 # ── JWT ───────────────────────────────────────────────────────
@@ -176,6 +175,10 @@ class SignUpRequest(BaseModel):
     name: str
     email: str
     password: str
+    age: int = 0
+    mobile: str = ""
+    dob: str = ""
+    gender: str = ""
 
 class LoginRequest(BaseModel):
     email: str
@@ -186,21 +189,12 @@ class GoogleLoginRequest(BaseModel):
     email: str
     photoUrl: str = ""
 
-class PatientRequest(BaseModel):
-    id: str
-    name: str
-    age: int
-    date: str
-    mobile: str
-    createdAt: str
-
 class ImageAnalysisModel(BaseModel):
     type: str
     finding: str
     confidence: int
 
 class ScanResultRequest(BaseModel):
-    patientId: str
     cancerProbability: float
     lesionType: str
     lesionLocations: List[str]
@@ -232,17 +226,21 @@ async def signup(req: SignUpRequest):
             "name": req.name.strip(),
             "email": req.email.lower().strip(),
             "password": hash_password(req.password),
-            "role": "doctor",
+            "age": req.age,
+            "mobile": req.mobile,
+            "dob": req.dob,
+            "gender": req.gender,
+            "role": "patient",
             "createdAt": datetime.utcnow().isoformat(),
         }
         result = await users_col.insert_one(user_doc)
         user_doc["_id"] = str(result.inserted_id)
         token = create_token({"sub": user_doc["email"]})
-        print(f"✅ New user signed up: {user_doc['email']}")
+        print(f"New user signed up: {user_doc['email']}")
         return {
             "access_token": token,
             "token_type": "bearer",
-            "user": {"id": user_doc["_id"], "name": user_doc["name"], "email": user_doc["email"], "role": user_doc["role"]},
+            "user": {"id": user_doc["_id"], "name": user_doc["name"], "email": user_doc["email"], "role": user_doc["role"], "age": user_doc["age"]},
         }
     except HTTPException:
         raise
@@ -265,11 +263,11 @@ async def login(req: LoginRequest):
             raise HTTPException(status_code=401, detail="Invalid Password. Please try again.")
         user = fix_id(user)
         token = create_token({"sub": user["email"]})
-        print(f"✅ User logged in: {user['email']}")
+        print(f"User logged in: {user['email']}")
         return {
             "access_token": token,
             "token_type": "bearer",
-            "user": {"id": user["_id"], "name": user["name"], "email": user["email"], "role": user.get("role", "doctor")},
+            "user": {"id": user["_id"], "name": user["name"], "email": user["email"], "role": user.get("role", "patient"), "age": user.get("age", 0)},
         }
     except HTTPException:
         raise
@@ -291,7 +289,7 @@ async def google_login(req: GoogleLoginRequest):
                 "name": req.name.strip(),
                 "email": req.email.lower().strip(),
                 "password": "",
-                "role": "doctor",
+                "role": "patient",
                 "photoUrl": req.photoUrl,
                 "loginType": "google",
                 "createdAt": datetime.utcnow().isoformat(),
@@ -304,7 +302,7 @@ async def google_login(req: GoogleLoginRequest):
         return {
             "access_token": token,
             "token_type": "bearer",
-            "user": {"id": user["_id"], "name": user["name"], "email": user["email"], "role": user.get("role", "doctor"), "photoUrl": user.get("photoUrl", "")},
+            "user": {"id": user["_id"], "name": user["name"], "email": user["email"], "role": user.get("role", "patient"), "photoUrl": user.get("photoUrl", "")},
         }
     except HTTPException:
         raise
@@ -315,56 +313,7 @@ async def google_login(req: GoogleLoginRequest):
 
 @app.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
-    return {"id": current_user["_id"], "name": current_user["name"], "email": current_user["email"], "role": current_user.get("role", "doctor")}
-
-
-# ══════════════════════════════════════════════════════════════
-# PATIENT ROUTES
-# ══════════════════════════════════════════════════════════════
-
-@app.post("/patients")
-async def create_patient(req: PatientRequest, current_user: dict = Depends(get_current_user)):
-    try:
-        patient_doc = {
-            "id": req.id,
-            "doctorId": current_user["_id"],
-            "name": req.name.strip(),
-            "age": req.age,
-            "date": req.date,
-            "mobile": req.mobile,
-            "createdAt": req.createdAt,
-            "updatedAt": datetime.utcnow().isoformat(),
-        }
-        existing = await patients_col.find_one({"id": req.id, "doctorId": current_user["_id"]})
-        if existing:
-            await patients_col.update_one({"id": req.id, "doctorId": current_user["_id"]}, {"$set": patient_doc})
-        else:
-            await patients_col.insert_one(patient_doc)
-        return {"message": "Patient saved successfully", "patientId": req.id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save patient: {str(e)}")
-
-
-@app.get("/patients")
-async def get_patients(current_user: dict = Depends(get_current_user)):
-    try:
-        cursor = patients_col.find({"doctorId": current_user["_id"]}, sort=[("createdAt", -1)])
-        patients = []
-        async for doc in cursor:
-            patients.append(fix_id(doc))
-        return patients
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/patients/{patient_id}")
-async def get_patient(patient_id: str, current_user: dict = Depends(get_current_user)):
-    patient = await patients_col.find_one({"id": patient_id, "doctorId": current_user["_id"]})
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found.")
-    return fix_id(patient)
+    return {"id": current_user["_id"], "name": current_user["name"], "email": current_user["email"], "role": current_user.get("role", "patient"), "age": current_user.get("age", 0)}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -375,8 +324,7 @@ async def get_patient(patient_id: str, current_user: dict = Depends(get_current_
 async def save_scan(req: ScanResultRequest, current_user: dict = Depends(get_current_user)):
     try:
         scan_doc = {
-            "patientId": req.patientId,
-            "doctorId": current_user["_id"],
+            "userId": current_user["_id"],
             "cancerProbability": req.cancerProbability,
             "lesionType": req.lesionType,
             "lesionLocations": req.lesionLocations,
@@ -389,10 +337,6 @@ async def save_scan(req: ScanResultRequest, current_user: dict = Depends(get_cur
             "createdAt": datetime.utcnow().isoformat(),
         }
         result = await scans_col.insert_one(scan_doc)
-        await patients_col.update_one(
-            {"id": req.patientId, "doctorId": current_user["_id"]},
-            {"$set": {"latestRisk": req.riskLevel, "latestProbability": req.cancerProbability, "latestLesion": req.lesionType, "lastScanDate": req.scanDate}},
-        )
         return {"message": "Scan saved successfully", "scanId": str(result.inserted_id)}
     except HTTPException:
         raise
@@ -403,19 +347,7 @@ async def save_scan(req: ScanResultRequest, current_user: dict = Depends(get_cur
 @app.get("/scans")
 async def get_all_scans(current_user: dict = Depends(get_current_user)):
     try:
-        cursor = scans_col.find({"doctorId": current_user["_id"]}, sort=[("createdAt", -1)])
-        scans = []
-        async for doc in cursor:
-            scans.append(fix_id(doc))
-        return scans
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/scans/{patient_id}")
-async def get_patient_scans(patient_id: str, current_user: dict = Depends(get_current_user)):
-    try:
-        cursor = scans_col.find({"patientId": patient_id, "doctorId": current_user["_id"]}, sort=[("createdAt", -1)])
+        cursor = scans_col.find({"userId": current_user["_id"]}, sort=[("createdAt", -1)])
         scans = []
         async for doc in cursor:
             scans.append(fix_id(doc))
@@ -496,20 +428,62 @@ async def predict_oral_images(
 
 
 # ══════════════════════════════════════════════════════════════
-# DASHBOARD
+# IMAGE VALIDATION (SMART MOCK FOR WEB)
 # ══════════════════════════════════════════════════════════════
 
-@app.get("/dashboard/stats")
-async def get_stats(current_user: dict = Depends(get_current_user)):
+@app.post("/validate-image")
+async def validate_image(
+    expected_type: str = Form(...),
+    image: UploadFile = File(...)
+):
     try:
-        total_patients = await patients_col.count_documents({"doctorId": current_user["_id"]})
-        total_scans = await scans_col.count_documents({"doctorId": current_user["_id"]})
-        high_risk = await scans_col.count_documents({"doctorId": current_user["_id"], "riskLevel": "high"})
-        moderate_risk = await scans_col.count_documents({"doctorId": current_user["_id"], "riskLevel": "moderate"})
-        low_risk = await scans_col.count_documents({"doctorId": current_user["_id"], "riskLevel": "low"})
-        return {"totalPatients": total_patients, "totalScans": total_scans, "highRisk": high_risk, "moderateRisk": moderate_risk, "lowRisk": low_risk}
+        filename = image.filename.lower()
+        contents = await image.read()
+        
+        expected = expected_type.lower()
+        if expected == "floor of mouth":
+            expected = "floor"
+        elif expected == "buccal mucosa":
+            expected = "buccal"
+
+        # Check if it's a real camera photo by filename convention
+        if "image_picker" in filename or "scaled_" in filename or len(filename) > 30:
+            try:
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(contents)).convert('RGB')
+                img = img.resize((30, 30))
+                pixels = list(img.getdata())
+                avg_r = sum(p[0] for p in pixels) / len(pixels)
+                avg_g = sum(p[1] for p in pixels) / len(pixels)
+                avg_b = sum(p[2] for p in pixels) / len(pixels)
+                
+                # Check for redness/pinkness typical of oral anatomy
+                is_oral = (avg_r > avg_g + 15) and (avg_r > avg_b + 15) and (avg_r > 50)
+                
+                if is_oral:
+                    return {"valid": True, "detected": expected_type}
+                else:
+                    return {
+                        "valid": False, 
+                        "detected": "non-oral object", 
+                        "error": f"Image does not match expected category: {expected_type}."
+                    }
+            except Exception as e:
+                print(f"PIL error: {e}")
+
+        # Fallback to filename mock for testing
+        if expected in filename or expected.replace(" ", "") in filename or expected.replace(" ", "_") in filename:
+            return {"valid": True, "detected": expected_type}
+            
+        return {
+            "valid": False, 
+            "detected": "unknown object", 
+            "error": f"Image does not match expected category: {expected_type}."
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"valid": False, "error": str(e)}
+
 
 
 # ══════════════════════════════════════════════════════════════

@@ -1,8 +1,8 @@
 import tensorflow as tf
-from tensorflow.keras.applications import EfficientNetB0
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
-from tensorflow.keras.models import Model
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from keras.applications import EfficientNetB0
+from keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from keras.models import Model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator  # type: ignore
 import numpy as np
 import json
 import os
