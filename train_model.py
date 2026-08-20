@@ -13,8 +13,8 @@ print("Starting training setup...")
 # ── Configuration ──────────────────────────────────────────────
 IMG_SIZE = 224
 BATCH_SIZE = 16
-EPOCHS_PHASE1 = 15
-EPOCHS_PHASE2 = 10
+EPOCHS_PHASE1 = 30
+EPOCHS_PHASE2 = 25
 DATASET_PATH = "dataset"
 
 # ── Check dataset exists ───────────────────────────────────────
